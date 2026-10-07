@@ -1,0 +1,19 @@
+# «Волна»: секреты, состояние и локальные журналы
+.env
+.env.local
+.volna/state.json
+.volna/journal/
+.volna/feedback.md
+.volna/project.local.md
+
+# Сборка и зависимости
+node_modules/
+dist/
+dist-ssr/
+*.local
+*.log
+
+# Редакторы
+.vscode/*
+!.vscode/extensions.json
+.idea/
