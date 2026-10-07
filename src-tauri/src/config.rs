@@ -2,11 +2,14 @@ use std::path::PathBuf;
 
 use serde_json::{json, Map, Value};
 
-// Настройки по умолчанию: размер шрифта, порядок проектов (date или name) и набор команд запуска
+// Настройки по умолчанию: шрифт, порядок проектов (date или name), панель проектов и набор команд запуска
 pub fn defaults() -> Value {
     json!({
         "fontSize": 14,
         "sort": "date",
+        "sideWidth": 260,
+        "sideFontSize": 13,
+        "collapsed": [],
         "commands": [
             {
                 "id": "claude",

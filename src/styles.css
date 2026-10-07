@@ -24,6 +24,8 @@ body {
 }
 #side {
   width: 260px;
+  max-width: 60vw;
+  flex: none;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -31,6 +33,15 @@ body {
   box-sizing: border-box;
   border-right: 1px solid #333;
   background: #161616;
+}
+#splitter {
+  width: 5px;
+  flex: none;
+  cursor: col-resize;
+}
+#splitter:hover,
+#splitter.drag {
+  background: #264f78;
 }
 #commands {
   display: flex;
@@ -109,7 +120,7 @@ li .live {
 }
 li .date {
   color: #777;
-  font-size: 11px;
+  font-size: 0.85em;
   white-space: nowrap;
 }
 li.selected .date {
@@ -136,11 +147,23 @@ li .ptype {
   min-width: 18px;
   margin-right: -2px;
   flex: none;
-  font: bold 12px "Cascadia Mono", Consolas, monospace;
+  font: bold 0.92em "Cascadia Mono", Consolas, monospace;
 }
 li .ptype img {
-  width: 13px;
-  height: 13px;
+  width: 1em;
+  height: 1em;
+}
+li .twist {
+  width: 0.9em;
+  flex: none;
+  color: #888;
+  text-align: center;
+}
+li.dir .name {
+  color: #aaa;
+}
+li.contains {
+  background: #1d3247;
 }
 #picker {
   position: fixed;

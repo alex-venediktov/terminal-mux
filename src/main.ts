@@ -32,6 +32,9 @@ interface SshHost {
 interface Config {
   fontSize: number;
   sort: "date" | "name";
+  sideWidth: number;
+  sideFontSize: number;
+  collapsed: string[];
   commands: Command[];
 }
 
@@ -60,10 +63,23 @@ interface Project {
   history: Map<string, number>;
 }
 
+interface TreeNode {
+  key: string;
+  path: string;
+  name: string;
+  project?: string;
+  children: TreeNode[];
+  modified: number;
+}
+
 const FONT_DEFAULT = 14;
+const SIDE_WIDTH = 260;
+const SIDE_FONT = 13;
 const APP_TITLE = "terminal-mux";
 
 const stage = document.getElementById("stage") as HTMLElement;
+const side = document.getElementById("side") as HTMLElement;
+const splitter = document.getElementById("splitter") as HTMLElement;
 const commandBar = document.getElementById("commands") as HTMLElement;
 const projectList = document.getElementById("projects") as HTMLUListElement;
 const toast = document.getElementById("toast") as HTMLElement;
@@ -75,7 +91,15 @@ let order: number[] = [];
 let activeId: number | null = null;
 let selectedKey: string | null = null;
 const projects = new Map<string, Project>();
-let config: Config = { fontSize: FONT_DEFAULT, sort: "date", commands: [] };
+let config: Config = {
+  fontSize: FONT_DEFAULT,
+  sort: "date",
+  sideWidth: SIDE_WIDTH,
+  sideFontSize: SIDE_FONT,
+  collapsed: [],
+  commands: [],
+};
+let collapsed = new Set<string>();
 let fontSize = FONT_DEFAULT;
 let saveTimer = 0;
 let toastTimer = 0;
@@ -91,16 +115,6 @@ function key(cwd: string): string {
 
 function basename(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
-}
-
-// Подпись проекта: имя каталога, а для скрытого каталога и совпадающих имен - вместе с родителем
-function projectLabel(cwd: string, duplicates: Set<string>): string {
-  const parts = cwd.split(/[\\/]/).filter(Boolean);
-  const name = parts[parts.length - 1] ?? cwd;
-  if ((name.startsWith(".") || duplicates.has(name.toLowerCase())) && parts.length > 2) {
-    return `${parts[parts.length - 2]}\\${name}`;
-  }
-  return name;
 }
 
 function formatDate(ms: number): string {
@@ -136,6 +150,26 @@ function setFont(size: number, save = true) {
     config.fontSize = fontSize;
     saveConfig({ fontSize });
     showToast(`шрифт ${fontSize}`);
+  }
+}
+
+// Ширина панели проектов не меньше 160 px; верхний предел 60% окна задает max-width в стилях
+function setSideWidth(width: number, save = true) {
+  const w = Math.round(Math.max(160, width));
+  side.style.width = `${w}px`;
+  if (save) {
+    config.sideWidth = w;
+    saveConfig({ sideWidth: w });
+  }
+}
+
+// Размер шрифта строк списка проектов, отдельный от шрифта терминала
+function setSideFont(size: number, save = true) {
+  config.sideFontSize = Math.min(24, Math.max(9, size));
+  projectList.style.fontSize = `${config.sideFontSize}px`;
+  if (save) {
+    saveConfig({ sideFontSize: config.sideFontSize });
+    showToast(`шрифт панели ${config.sideFontSize}`);
   }
 }
 
@@ -416,52 +450,118 @@ function setSort(sort: "date" | "name") {
   renderProjects();
 }
 
-function renderProjects() {
-  const seen = new Set<string>();
-  const duplicates = new Set<string>();
-  for (const p of projects.values()) {
-    const n = basename(p.cwd).toLowerCase();
-    if (seen.has(n)) duplicates.add(n);
-    seen.add(n);
+// Дерево проектов по сегментам пути без учета регистра
+function buildTree(): TreeNode[] {
+  const root: TreeNode = { key: "", path: "", name: "", children: [], modified: 0 };
+  const index = new Map<string, TreeNode>();
+  for (const [k, p] of projects) {
+    let node = root;
+    for (const part of p.cwd.split(/[\\/]/).filter(Boolean)) {
+      const path = node.key ? `${node.path}\\${part}` : part;
+      const nodeKey = node.key ? `${node.key}\\${part.toLowerCase()}` : part.toLowerCase();
+      let next = index.get(nodeKey);
+      if (!next) {
+        next = { key: nodeKey, path, name: part, children: [], modified: 0 };
+        index.set(nodeKey, next);
+        node.children.push(next);
+      }
+      node = next;
+    }
+    node.project = k;
   }
-  const label = (p: Project) => projectLabel(p.cwd, duplicates);
-  const sorted = [...projects.entries()].sort((a, b) =>
-    config.sort === "name"
-      ? label(a[1]).localeCompare(label(b[1]), "ru", { sensitivity: "base" })
-      : b[1].modified - a[1].modified,
+  return compact(root).children;
+}
+
+// Дата узла по самому свежему проекту внутри и сортировка уровня; каталог без проекта с одним потомком склеивается с ним
+function compact(node: TreeNode): TreeNode {
+  node.children = node.children.map(compact);
+  node.modified = node.project ? projects.get(node.project)!.modified : 0;
+  for (const c of node.children) node.modified = Math.max(node.modified, c.modified);
+  if (node.key && !node.project && node.children.length === 1) {
+    const child = node.children[0];
+    return { ...child, name: `${node.name}\\${child.name}` };
+  }
+  node.children.sort((a, b) =>
+    config.sort === "name" ? a.name.localeCompare(b.name, "ru", { sensitivity: "base" }) : b.modified - a.modified,
   );
+  return node;
+}
+
+// Ключи проектов в поддереве узла, включая сам узел
+function projectsIn(node: TreeNode): string[] {
+  return [...(node.project ? [node.project] : []), ...node.children.flatMap(projectsIn)];
+}
+
+function toggleNode(k: string) {
+  if (!collapsed.delete(k)) collapsed.add(k);
+  config.collapsed = [...collapsed];
+  saveConfig({ collapsed: config.collapsed });
+  renderProjects();
+}
+
+function renderProjects() {
   const items: HTMLLIElement[] = [];
-  for (const [k, p] of sorted) {
-    const li = document.createElement("li");
-    li.className = k === selectedKey ? "selected" : "";
-    li.title = `${p.cwd}\nдвойной клик - открыть`;
-    // Тип проекта: иконки команд, чья история есть в проекте, свежая первой
-    const types = document.createElement("span");
-    types.className = "ptype";
-    for (const [kind] of [...p.history].sort((a, b) => b[1] - a[1])) {
-      const cmd = config.commands.find((c) => c.history === kind);
-      if (cmd) types.appendChild(iconNode(cmd));
+  const walk = (nodes: TreeNode[], depth: number) => {
+    for (const node of nodes) {
+      const folded = node.children.length > 0 && collapsed.has(node.key);
+      const li = document.createElement("li");
+      li.style.paddingLeft = `calc(6px + ${depth * 1.1}em)`;
+      const twist = document.createElement("span");
+      twist.className = "twist";
+      if (node.children.length) twist.textContent = folded ? "▸" : "▾";
+      li.appendChild(twist);
+      const inner = folded ? projectsIn(node) : node.project ? [node.project] : [];
+      if (node.project) {
+        const k = node.project;
+        const p = projects.get(k)!;
+        li.className = k === selectedKey ? "selected" : "";
+        li.title = `${p.cwd}\nдвойной клик - открыть`;
+        // Тип проекта: иконки команд, чья история есть в проекте, свежая первой
+        const types = document.createElement("span");
+        types.className = "ptype";
+        for (const [kind] of [...p.history].sort((a, b) => b[1] - a[1])) {
+          const cmd = config.commands.find((c) => c.history === kind);
+          if (cmd) types.appendChild(iconNode(cmd));
+        }
+        li.appendChild(types);
+        li.onclick = () => selectProject(k);
+        li.ondblclick = () => openProject(k);
+        if (node.children.length) {
+          twist.onclick = (e) => {
+            e.stopPropagation();
+            toggleNode(node.key);
+          };
+          twist.ondblclick = (e) => e.stopPropagation();
+        }
+      } else {
+        li.className = "dir";
+        li.title = node.path;
+        li.onclick = () => toggleNode(node.key);
+      }
+      // Свернутый узел подсвечивается, если внутри выбранный проект
+      if (folded && selectedKey && selectedKey !== node.project && inner.includes(selectedKey)) {
+        li.classList.add("contains");
+      }
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = node.name;
+      li.appendChild(name);
+      const live = inner.reduce((n, k) => n + liveInProject(k).length, 0);
+      if (live) {
+        const dot = document.createElement("span");
+        dot.className = "live";
+        dot.textContent = live > 1 ? `● ${live}` : "●";
+        li.appendChild(dot);
+      }
+      const date = document.createElement("span");
+      date.className = "date";
+      date.textContent = formatDate(node.project ? projects.get(node.project)!.modified : node.modified);
+      li.appendChild(date);
+      items.push(li);
+      if (!folded) walk(node.children, depth + 1);
     }
-    li.appendChild(types);
-    const name = document.createElement("span");
-    name.className = "name";
-    name.textContent = label(p);
-    li.appendChild(name);
-    const live = liveInProject(k).length;
-    if (live) {
-      const dot = document.createElement("span");
-      dot.className = "live";
-      dot.textContent = live > 1 ? `● ${live}` : "●";
-      li.appendChild(dot);
-    }
-    const date = document.createElement("span");
-    date.className = "date";
-    date.textContent = formatDate(p.modified);
-    li.appendChild(date);
-    li.onclick = () => selectProject(k);
-    li.ondblclick = () => openProject(k);
-    items.push(li);
-  }
+  };
+  walk(buildTree(), 0);
   projectList.replaceChildren(...items);
 }
 
@@ -593,6 +693,35 @@ stage.addEventListener(
   { capture: true, passive: false },
 );
 
+// Alt + колесо мыши над панелью меняет размер шрифта списка проектов
+side.addEventListener(
+  "wheel",
+  (e) => {
+    if (!e.altKey) return;
+    e.preventDefault();
+    setSideFont(config.sideFontSize + (e.deltaY < 0 ? 1 : -1));
+  },
+  { passive: false },
+);
+
+// Перетаскивание разделителя меняет ширину панели, ширина сохраняется при отпускании
+splitter.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  splitter.setPointerCapture(e.pointerId);
+  splitter.classList.add("drag");
+  const x0 = e.clientX;
+  const w0 = side.offsetWidth;
+  splitter.onpointermove = (m) => setSideWidth(w0 + m.clientX - x0, false);
+  splitter.onlostpointercapture = () => {
+    splitter.onpointermove = null;
+    splitter.onlostpointercapture = null;
+    splitter.classList.remove("drag");
+    setSideWidth(side.offsetWidth);
+  };
+});
+splitter.addEventListener("dblclick", () => setSideWidth(SIDE_WIDTH));
+
 // Картинка в буфере без текста: приложению уходит его сочетание вставки картинки, файл оно читает само
 stage.addEventListener(
   "paste",
@@ -622,6 +751,9 @@ invoke<Config>("get_config")
   .catch(() => {})
   .finally(() => {
     setFont(config.fontSize || FONT_DEFAULT, false);
+    setSideWidth(config.sideWidth || SIDE_WIDTH, false);
+    setSideFont(config.sideFontSize || SIDE_FONT, false);
+    collapsed = new Set(Array.isArray(config.collapsed) ? config.collapsed : []);
     document.querySelectorAll<HTMLButtonElement>("#bar .sort button").forEach((b) => {
       b.classList.toggle("on", b.dataset.sort === (config.sort ?? "date"));
     });

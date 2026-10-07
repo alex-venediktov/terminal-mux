@@ -8,4 +8,4 @@
 (протокол клавиатуры kitty). Оба варианта проверены вживую.
 
 **источник:**
-- `src-tauri/src/config.rs:32` — `"shiftEnter": "\u{1b}[13;2u",`
+- `src-tauri/src/config.rs:35` — `"shiftEnter": "\u{1b}[13;2u",`
