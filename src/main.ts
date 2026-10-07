@@ -81,6 +81,9 @@ let saveTimer = 0;
 let toastTimer = 0;
 let renderTimer = 0;
 const iconCache = new Map<string, string>();
+const closed = new Set<number>();
+const writeQueues = new Map<number, Promise<unknown>>();
+let configPatch: Partial<Config> = {};
 
 function key(cwd: string): string {
   return cwd.replace(/[\\/]+$/, "").toLowerCase();
@@ -108,17 +111,21 @@ function formatDate(ms: number): string {
   return `${two(d.getDate())}.${two(d.getMonth() + 1)}.${d.getFullYear()}`;
 }
 
-function showToast(text: string) {
+function showToast(text: string, ms = 900) {
   toast.textContent = text;
   toast.classList.add("visible");
   clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => toast.classList.remove("visible"), 900);
+  toastTimer = window.setTimeout(() => toast.classList.remove("visible"), ms);
 }
 
-// Сохранение config.json с задержкой, чтобы не писать файл на каждый шаг колеса
-function saveConfig() {
+// Сохранение измененных ключей config.json с задержкой, чтобы не писать файл на каждый шаг колеса
+function saveConfig(patch: Partial<Config>) {
+  configPatch = { ...configPatch, ...patch };
   clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(() => invoke("set_config", { value: config }).catch(() => {}), 500);
+  saveTimer = window.setTimeout(() => {
+    invoke("set_config", { value: configPatch }).catch(() => {});
+    configPatch = {};
+  }, 500);
 }
 
 function setFont(size: number, save = true) {
@@ -127,7 +134,7 @@ function setFont(size: number, save = true) {
   fitAll();
   if (save) {
     config.fontSize = fontSize;
-    saveConfig();
+    saveConfig({ fontSize });
     showToast(`шрифт ${fontSize}`);
   }
 }
@@ -154,6 +161,13 @@ function hostKeys(cmd: Command, term: Terminal, e: KeyboardEvent): boolean {
     return false;
   }
   if (e.type !== "keydown") return true;
+  const id = idOf(term);
+  // Ctrl+Shift+W закрывает экземпляр; у завершившегося процесса - любая клавиша
+  if ((e.ctrlKey && e.shiftKey && e.code === "KeyW") || (id !== null && instances.get(id)?.exited && !isModifier(e))) {
+    if (id !== null) closeInstance(id);
+    e.preventDefault();
+    return false;
+  }
   if (e.altKey && !e.ctrlKey && !e.shiftKey) {
     const step = ({ Equal: 1, NumpadAdd: 1, Minus: -1, NumpadSubtract: -1 } as Record<string, number>)[e.code];
     if (step) {
@@ -180,6 +194,10 @@ function hostKeys(cmd: Command, term: Terminal, e: KeyboardEvent): boolean {
   // Вставку выполняет обработчик paste в xterm.js с учетом bracketed paste
   if (e.ctrlKey && e.key.toLowerCase() === "v") return false;
   return true;
+}
+
+function isModifier(e: KeyboardEvent): boolean {
+  return ["Control", "Shift", "Alt", "Meta"].includes(e.key);
 }
 
 function createTerminal(cmd: Command): { term: Terminal; fit: FitAddon; el: HTMLDivElement } {
@@ -217,7 +235,11 @@ function send(id: number | null, data: string) {
   if (id === null) return;
   const inst = instances.get(id);
   if (!inst || inst.exited) return;
-  invoke("write", { id, data }).catch((e) => console.error(e));
+  // Записи в экземпляр идут строго по очереди: асинхронные команды Tauri выполняются параллельно
+  const queue = (writeQueues.get(id) ?? Promise.resolve())
+    .then(() => invoke("write", { id, data }))
+    .catch((e) => console.error(e));
+  writeQueues.set(id, queue);
 }
 
 async function spawn(cmd: Command, cwd: string | null, pick?: { args: string[]; subtitle: string }) {
@@ -225,7 +247,7 @@ async function spawn(cmd: Command, cwd: string | null, pick?: { args: string[]; 
   if (cmd.elevate) {
     invoke("launch_elevated", { program: cmd.program, args: cmd.args, cwd })
       .then(() => showToast(`${cmd.title}: отдельное окно`))
-      .catch((e) => showToast(String(e)));
+      .catch((e) => showToast(String(e), 4000));
     return;
   }
   const project = cwd ? projects.get(key(cwd)) : undefined;
@@ -233,6 +255,7 @@ async function spawn(cmd: Command, cwd: string | null, pick?: { args: string[]; 
   const cont = !!cmd.history && !!project?.history.has(cmd.history);
   const args = pick?.args ?? [...cmd.args, ...(cont ? cmd.continueArgs ?? [] : [])];
   const { term, fit, el } = createTerminal(cmd);
+  const previous = activeId;
   for (const other of instances.values()) other.el.classList.remove("active");
   try {
     const res = await invoke<{ id: number }>("spawn", {
@@ -268,7 +291,11 @@ async function spawn(cmd: Command, cwd: string | null, pick?: { args: string[]; 
     }
     activate(inst.id);
   } catch (e) {
-    term.write(`\r\n[ошибка запуска ${cmd.program}: ${e}]\r\n`);
+    // Неудачный запуск не оставляет терминала: возвращается прежний активный экземпляр
+    term.dispose();
+    el.remove();
+    if (previous !== null) activate(previous);
+    showToast(`ошибка запуска ${cmd.title}: ${e}`, 4000);
   }
 }
 
@@ -314,6 +341,8 @@ function closeInstance(id: number) {
   const inst = instances.get(id);
   if (!inst) return;
   invoke("kill", { id }).catch(() => {});
+  closed.add(id);
+  writeQueues.delete(id);
   inst.term.dispose();
   inst.el.remove();
   instances.delete(id);
@@ -380,7 +409,7 @@ async function newInDirectory() {
 
 function setSort(sort: "date" | "name") {
   config.sort = sort;
-  saveConfig();
+  saveConfig({ sort });
   document.querySelectorAll<HTMLButtonElement>("#bar .sort button").forEach((b) => {
     b.classList.toggle("on", b.dataset.sort === sort);
   });
@@ -525,6 +554,7 @@ async function loadProjects() {
 
 listen<{ id: number; data: string }>("pty-output", (e) => {
   const inst = instances.get(e.payload.id);
+  if (closed.has(e.payload.id)) return;
   if (!inst) {
     pending.set(e.payload.id, [...(pending.get(e.payload.id) ?? []), e.payload.data]);
     return;
@@ -542,7 +572,7 @@ listen<{ id: number; code: number | null }>("pty-exit", (e) => {
     return;
   }
   inst.exited = true;
-  inst.term.write(`\r\n\x1b[90m[процесс завершен, код ${e.payload.code ?? "?"}]\x1b[0m\r\n`);
+  inst.term.write(`\r\n\x1b[90m[процесс завершен, код ${e.payload.code ?? "?"}; любая клавиша - закрыть]\x1b[0m\r\n`);
   renderProjects();
 });
 

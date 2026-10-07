@@ -24,6 +24,12 @@ limits:
   stale_days: 365
 checks:
   exec_enabled: false
+topics:
+  conpty: псевдоконсоль Windows - что хост обязан делать сам
+  claude: Claude Code как дочерний процесс - окружение, хранилище сессий, клавиши
+  pi: pi как дочерний процесс - клавиши, режимы
+  tauri: Tauri 2 - команды, сборка, кеш
+  windows: Windows - права, запуск программ
 ```
 
 ## Корни сверки

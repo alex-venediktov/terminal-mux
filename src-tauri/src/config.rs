@@ -107,6 +107,14 @@ pub fn load(path: &PathBuf) -> Value {
     cfg
 }
 
+pub fn update(path: &PathBuf, patch: Value) -> Result<(), String> {
+    let mut cfg = load(path);
+    if let (Some(base), Value::Object(p)) = (cfg.as_object_mut(), patch) {
+        merge(base, p);
+    }
+    save(path, &cfg)
+}
+
 pub fn save(path: &PathBuf, cfg: &Value) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -195,5 +203,22 @@ mod tests {
         assert!(target.is_file() && !old.exists());
         std::fs::write(exe.join("config.json"), "{}").unwrap();
         assert_eq!(locate(Some(exe.clone()), Some(home), None), Some(exe.join("config.json")));
+    }
+
+    /// Изменение ключа сохраняет правки файла, сделанные после запуска, и порядок ключей.
+    #[test]
+    fn update_merges_patch_into_current_file() {
+        let path = std::env::temp_dir().join("mux-config-update").join("config.json");
+        let _ = std::fs::remove_file(&path);
+        load(&path);
+        let mut edited = load(&path);
+        edited["commands"] = serde_json::json!([{"id": "cmd", "program": "cmd.exe"}]);
+        save(&path, &edited).unwrap();
+        update(&path, serde_json::json!({"fontSize": 20})).unwrap();
+        let cfg = load(&path);
+        assert_eq!(cfg["fontSize"], 20);
+        assert_eq!(cfg["commands"].as_array().unwrap().len(), 1);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.find("fontSize").unwrap() < text.find("commands").unwrap());
     }
 }

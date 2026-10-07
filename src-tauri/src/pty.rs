@@ -14,9 +14,10 @@ pub trait Sink: Send + Sync + 'static {
     fn exit(&self, id: u32, code: Option<u32>);
 }
 
+// Запись идет под блокировкой своего экземпляра: зависший ввод одного процесса не останавливает остальные
 struct Instance {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
 }
 
@@ -192,15 +193,16 @@ impl Registry {
             }
         });
 
+        let writer = Arc::new(Mutex::new(writer));
         self.items.lock().unwrap().insert(id, Instance { master: pair.master, writer, child });
         Ok(Spawned { id, program: program.to_string_lossy().into_owned() })
     }
 
     pub fn write(&self, id: u32, data: &[u8]) -> Result<(), String> {
-        let mut items = self.items.lock().unwrap();
-        let inst = items.get_mut(&id).ok_or("нет экземпляра")?;
-        inst.writer.write_all(data).map_err(|e| e.to_string())?;
-        inst.writer.flush().map_err(|e| e.to_string())
+        let writer = self.items.lock().unwrap().get(&id).ok_or("нет экземпляра")?.writer.clone();
+        let mut writer = writer.lock().map_err(|_| "запись недоступна")?;
+        writer.write_all(data).map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())
     }
 
     pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), String> {

@@ -38,7 +38,7 @@ impl Sink for EventSink {
 }
 
 #[tauri::command]
-fn spawn(
+async fn spawn(
     app: AppHandle,
     reg: State<'_, Registry>,
     program: String,
@@ -59,7 +59,7 @@ fn cwd_or_home(cwd: Option<&str>) -> String {
 }
 
 #[tauri::command]
-fn launch_elevated(program: String, args: Vec<String>, cwd: Option<String>) -> Result<(), String> {
+async fn launch_elevated(program: String, args: Vec<String>, cwd: Option<String>) -> Result<(), String> {
     let dir = cwd_or_home(cwd.as_deref());
     elevate::launch(&pty::expand_env(&program), &elevate::expand_args(&args, &dir), Some(&dir))
 }
@@ -70,17 +70,17 @@ async fn list_ssh_hosts() -> Vec<ssh::SshHost> {
 }
 
 #[tauri::command]
-fn write(reg: State<'_, Registry>, id: u32, data: String) -> Result<(), String> {
+async fn write(reg: State<'_, Registry>, id: u32, data: String) -> Result<(), String> {
     reg.write(id, data.as_bytes())
 }
 
 #[tauri::command]
-fn resize(reg: State<'_, Registry>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+async fn resize(reg: State<'_, Registry>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
     reg.resize(id, cols, rows)
 }
 
 #[tauri::command]
-fn kill(reg: State<'_, Registry>, id: u32) -> Result<(), String> {
+async fn kill(reg: State<'_, Registry>, id: u32) -> Result<(), String> {
     reg.kill(id)
 }
 
@@ -100,9 +100,10 @@ fn get_config(app: AppHandle) -> Result<Value, String> {
     Ok(config::load(&config_path(&app)?))
 }
 
+// Изменение отдельных ключей конфига поверх текущего файла: ручные правки файла не затираются
 #[tauri::command]
 fn set_config(app: AppHandle, value: Value) -> Result<(), String> {
-    config::save(&config_path(&app)?, &value)
+    config::update(&config_path(&app)?, value)
 }
 
 // Картинка иконки команды из файла как data URL для фронтенда
