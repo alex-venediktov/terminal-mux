@@ -19,6 +19,14 @@ interface Command {
   shiftEnter?: string;
   elevate?: boolean;
   pasteImage?: string;
+  pick?: "ssh-hosts";
+}
+
+interface SshHost {
+  alias: string;
+  host_name: string | null;
+  user: string | null;
+  port: string | null;
 }
 
 interface Config {
@@ -36,6 +44,7 @@ interface Instance {
   fit: FitAddon;
   el: HTMLDivElement;
   exited: boolean;
+  subtitle?: string;
 }
 
 interface ProjectInfo {
@@ -211,7 +220,7 @@ function send(id: number | null, data: string) {
   invoke("write", { id, data }).catch((e) => console.error(e));
 }
 
-async function spawn(cmd: Command, cwd: string | null) {
+async function spawn(cmd: Command, cwd: string | null, pick?: { args: string[]; subtitle: string }) {
   // Команда с повышением прав открывается в отдельном окне после диалога UAC
   if (cmd.elevate) {
     invoke("launch_elevated", { program: cmd.program, args: cmd.args, cwd })
@@ -222,7 +231,7 @@ async function spawn(cmd: Command, cwd: string | null) {
   const project = cwd ? projects.get(key(cwd)) : undefined;
   // Продолжение последней сессии проекта, если у команды есть история и она уже есть на диске
   const cont = !!cmd.history && !!project?.history.has(cmd.history);
-  const args = [...cmd.args, ...(cont ? cmd.continueArgs ?? [] : [])];
+  const args = pick?.args ?? [...cmd.args, ...(cont ? cmd.continueArgs ?? [] : [])];
   const { term, fit, el } = createTerminal(cmd);
   for (const other of instances.values()) other.el.classList.remove("active");
   try {
@@ -233,7 +242,17 @@ async function spawn(cmd: Command, cwd: string | null) {
       cols: term.cols,
       rows: term.rows,
     });
-    const inst: Instance = { id: res.id, cmd, cwd, oscTitle: "", term, fit, el, exited: false };
+    const inst: Instance = {
+      id: res.id,
+      cmd,
+      cwd,
+      oscTitle: "",
+      term,
+      fit,
+      el,
+      exited: false,
+      subtitle: pick?.subtitle,
+    };
     instances.set(inst.id, inst);
     order.push(inst.id);
     term.onData((d) => send(inst.id, d));
@@ -256,7 +275,9 @@ async function spawn(cmd: Command, cwd: string | null) {
 function updateTitle() {
   const inst = activeId !== null ? instances.get(activeId) : undefined;
   const title = inst
-    ? [inst.cmd.title, inst.cwd ? basename(inst.cwd) : "~", inst.oscTitle].filter(Boolean).join(" - ")
+    ? [inst.cmd.title, inst.subtitle ?? (inst.cwd ? basename(inst.cwd) : "~"), inst.oscTitle]
+        .filter(Boolean)
+        .join(" - ")
     : APP_TITLE;
   appWindow.setTitle(title).catch(() => {});
 }
@@ -441,10 +462,54 @@ async function renderCommands() {
       const b = document.createElement("button");
       b.title = cmd.title;
       b.appendChild(iconNode(cmd));
-      b.onclick = () => spawn(cmd, targetCwd());
+      b.onclick = () => (cmd.pick === "ssh-hosts" ? openSshPicker(cmd, b) : spawn(cmd, targetCwd()));
       return b;
     }),
   );
+}
+
+// Выпадающий список хостов из ~/.ssh/config под кнопкой команды; выбор подставляет хост вместо {host}
+async function openSshPicker(cmd: Command, button: HTMLElement) {
+  document.getElementById("picker")?.remove();
+  const hosts = await invoke<SshHost[]>("list_ssh_hosts").catch(() => []);
+  if (!hosts.length) {
+    showToast("в ~/.ssh/config нет хостов");
+    return;
+  }
+  const menu = document.createElement("ul");
+  menu.id = "picker";
+  const r = button.getBoundingClientRect();
+  menu.style.left = `${r.left}px`;
+  menu.style.top = `${r.bottom + 4}px`;
+  for (const h of hosts) {
+    const li = document.createElement("li");
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = h.alias;
+    const meta = document.createElement("span");
+    meta.className = "date";
+    meta.textContent = [h.user ? `${h.user}@` : "", h.host_name ?? "", h.port ? `:${h.port}` : ""].join("");
+    li.append(name, meta);
+    li.onclick = () => {
+      close();
+      spawn(cmd, null, { args: cmd.args.map((a) => a.split("{host}").join(h.alias)), subtitle: h.alias });
+    };
+    menu.appendChild(li);
+  }
+  const close = () => {
+    menu.remove();
+    document.removeEventListener("mousedown", outside, true);
+    document.removeEventListener("keydown", escape, true);
+  };
+  const outside = (e: MouseEvent) => {
+    if (!menu.contains(e.target as Node)) close();
+  };
+  const escape = (e: KeyboardEvent) => {
+    if (e.key === "Escape") close();
+  };
+  document.addEventListener("mousedown", outside, true);
+  document.addEventListener("keydown", escape, true);
+  document.body.appendChild(menu);
 }
 
 // Проекты из хранилищ сессий; удаленные с диска каталоги не показываются

@@ -2,6 +2,7 @@ mod config;
 mod elevate;
 mod pty;
 mod sessions;
+mod ssh;
 
 use std::sync::Arc;
 
@@ -60,7 +61,12 @@ fn cwd_or_home(cwd: Option<&str>) -> String {
 #[tauri::command]
 fn launch_elevated(program: String, args: Vec<String>, cwd: Option<String>) -> Result<(), String> {
     let dir = cwd_or_home(cwd.as_deref());
-    elevate::launch(&program, &elevate::expand_args(&args, &dir), Some(&dir))
+    elevate::launch(&pty::expand_env(&program), &elevate::expand_args(&args, &dir), Some(&dir))
+}
+
+#[tauri::command]
+async fn list_ssh_hosts() -> Vec<ssh::SshHost> {
+    ssh::list_hosts()
 }
 
 #[tauri::command]
@@ -141,7 +147,8 @@ pub fn run() {
             get_config,
             set_config,
             read_icon,
-            launch_elevated
+            launch_elevated,
+            list_ssh_hosts
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

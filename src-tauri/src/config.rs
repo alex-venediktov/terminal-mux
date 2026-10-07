@@ -50,6 +50,15 @@ pub fn defaults() -> Value {
                 "elevate": true
             },
             {
+                "id": "ssh",
+                "title": "SSH",
+                "icon": "ssh",
+                "color": "#c586c0",
+                "program": "%SystemRoot%\\System32\\OpenSSH\\ssh.exe",
+                "args": ["{host}"],
+                "pick": "ssh-hosts"
+            },
+            {
                 "id": "cmd",
                 "title": "Командная строка",
                 "icon": "C:\\",

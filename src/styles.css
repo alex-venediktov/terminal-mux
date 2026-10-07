@@ -142,3 +142,15 @@ li .ptype img {
   width: 13px;
   height: 13px;
 }
+#picker {
+  position: fixed;
+  z-index: 20;
+  min-width: 220px;
+  max-height: 60vh;
+  flex: none;
+  padding: 4px;
+  background: #1e1e1e;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}

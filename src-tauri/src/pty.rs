@@ -50,6 +50,8 @@ const SESSION_ENV: &[&str] = &[
 // Программа и аргументы запуска: поиск в PATH, обертка npm (.cmd) раскрывается в node со скриптом пакета
 pub fn build_command(program: &str, args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
     let mut full: Vec<String> = args.to_vec();
+    let program = expand_env(program);
+    let program = program.as_str();
     let given = Path::new(program);
     let found = if given.is_absolute() {
         given.to_path_buf()
@@ -62,6 +64,24 @@ pub fn build_command(program: &str, args: &[String]) -> Result<(PathBuf, Vec<Str
         return Ok((node, full));
     }
     Ok((found, full))
+}
+
+// Подстановка переменных окружения вида %SystemRoot%; неизвестная переменная остается как есть
+pub fn expand_env(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        let Some(len) = rest[start + 1..].find('%') else { break };
+        let name = &rest[start + 1..start + 1 + len];
+        out.push_str(&rest[..start]);
+        match std::env::var(name) {
+            Ok(value) if !name.is_empty() => out.push_str(&value),
+            _ => out.push_str(&rest[start..start + len + 2]),
+        }
+        rest = &rest[start + len + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 // Поиск исполняемого файла в PATH с учетом PATHEXT
@@ -263,5 +283,13 @@ mod tests {
             assert!(args[0].ends_with(".js"));
             assert_eq!(&args[1..], ["--continue"]);
         }
+    }
+
+    /// Переменные окружения в пути программы раскрываются, неизвестные остаются нетронутыми.
+    #[test]
+    fn env_variables_in_program_path_are_expanded() {
+        std::env::set_var("MUX_TEST_ROOT", r"C:\Win");
+        assert_eq!(expand_env(r"%MUX_TEST_ROOT%\System32\ssh.exe"), r"C:\Win\System32\ssh.exe");
+        assert_eq!(expand_env(r"%MUX_NO_SUCH_VAR%\x 100%"), r"%MUX_NO_SUCH_VAR%\x 100%");
     }
 }
