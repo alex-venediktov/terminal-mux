@@ -1,0 +1,535 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open } from "@tauri-apps/plugin-dialog";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
+import "@xterm/xterm/css/xterm.css";
+
+interface Command {
+  id: string;
+  title: string;
+  icon: string;
+  color?: string;
+  program: string;
+  args: string[];
+  continueArgs?: string[];
+  history?: string;
+  shiftEnter?: string;
+  elevate?: boolean;
+  pasteImage?: string;
+}
+
+interface Config {
+  fontSize: number;
+  sort: "date" | "name";
+  commands: Command[];
+}
+
+interface Instance {
+  id: number;
+  cmd: Command;
+  cwd: string | null;
+  oscTitle: string;
+  term: Terminal;
+  fit: FitAddon;
+  el: HTMLDivElement;
+  exited: boolean;
+}
+
+interface ProjectInfo {
+  cwd: string;
+  modified: number;
+  history: Record<string, number>;
+  exists: boolean;
+}
+
+interface Project {
+  cwd: string;
+  modified: number;
+  history: Map<string, number>;
+}
+
+const FONT_DEFAULT = 14;
+const APP_TITLE = "terminal-mux";
+
+const stage = document.getElementById("stage") as HTMLElement;
+const commandBar = document.getElementById("commands") as HTMLElement;
+const projectList = document.getElementById("projects") as HTMLUListElement;
+const toast = document.getElementById("toast") as HTMLElement;
+const appWindow = getCurrentWindow();
+
+const instances = new Map<number, Instance>();
+const pending = new Map<number, string[]>();
+let order: number[] = [];
+let activeId: number | null = null;
+let selectedKey: string | null = null;
+const projects = new Map<string, Project>();
+let config: Config = { fontSize: FONT_DEFAULT, sort: "date", commands: [] };
+let fontSize = FONT_DEFAULT;
+let saveTimer = 0;
+let toastTimer = 0;
+let renderTimer = 0;
+const iconCache = new Map<string, string>();
+
+function key(cwd: string): string {
+  return cwd.replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function basename(p: string): string {
+  return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
+}
+
+// Подпись проекта: имя каталога, а для скрытого каталога и совпадающих имен - вместе с родителем
+function projectLabel(cwd: string, duplicates: Set<string>): string {
+  const parts = cwd.split(/[\\/]/).filter(Boolean);
+  const name = parts[parts.length - 1] ?? cwd;
+  if ((name.startsWith(".") || duplicates.has(name.toLowerCase())) && parts.length > 2) {
+    return `${parts[parts.length - 2]}\\${name}`;
+  }
+  return name;
+}
+
+function formatDate(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const two = (n: number) => String(n).padStart(2, "0");
+  if (d.toDateString() === now.toDateString()) return `сегодня ${two(d.getHours())}:${two(d.getMinutes())}`;
+  return `${two(d.getDate())}.${two(d.getMonth() + 1)}.${d.getFullYear()}`;
+}
+
+function showToast(text: string) {
+  toast.textContent = text;
+  toast.classList.add("visible");
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => toast.classList.remove("visible"), 900);
+}
+
+// Сохранение config.json с задержкой, чтобы не писать файл на каждый шаг колеса
+function saveConfig() {
+  clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(() => invoke("set_config", { value: config }).catch(() => {}), 500);
+}
+
+function setFont(size: number, save = true) {
+  fontSize = Math.min(36, Math.max(8, size));
+  for (const inst of instances.values()) inst.term.options.fontSize = fontSize;
+  fitAll();
+  if (save) {
+    config.fontSize = fontSize;
+    saveConfig();
+    showToast(`шрифт ${fontSize}`);
+  }
+}
+
+// Отметка активности проекта: поднимает его наверх списка
+function touch(cwd: string | null) {
+  if (!cwd) return;
+  const k = key(cwd);
+  const p = projects.get(k) ?? { cwd, modified: 0, history: new Map() };
+  p.modified = Date.now();
+  projects.set(k, p);
+  if (renderTimer) return;
+  renderTimer = window.setTimeout(() => {
+    renderTimer = 0;
+    renderProjects();
+  }, 1000);
+}
+
+// Клавиши, которые перехватывает мультиплексор до xterm.js
+function hostKeys(cmd: Command, term: Terminal, e: KeyboardEvent): boolean {
+  if (e.key === "Enter" && e.shiftKey && !e.ctrlKey && !e.altKey && cmd.shiftEnter !== undefined) {
+    if (e.type === "keydown") send(idOf(term), cmd.shiftEnter);
+    e.preventDefault();
+    return false;
+  }
+  if (e.type !== "keydown") return true;
+  if (e.altKey && !e.ctrlKey && !e.shiftKey) {
+    const step = ({ Equal: 1, NumpadAdd: 1, Minus: -1, NumpadSubtract: -1 } as Record<string, number>)[e.code];
+    if (step) {
+      setFont(fontSize + step);
+      e.preventDefault();
+      return false;
+    }
+    if (e.code === "Digit0" || e.code === "Numpad0") {
+      setFont(FONT_DEFAULT);
+      e.preventDefault();
+      return false;
+    }
+  }
+  if (e.ctrlKey && (e.key === "PageUp" || e.key === "PageDown")) {
+    cycle(e.key === "PageDown" ? 1 : -1);
+    e.preventDefault();
+    return false;
+  }
+  if (e.ctrlKey && e.key.toLowerCase() === "c" && term.hasSelection()) {
+    navigator.clipboard.writeText(term.getSelection());
+    term.clearSelection();
+    return false;
+  }
+  // Вставку выполняет обработчик paste в xterm.js с учетом bracketed paste
+  if (e.ctrlKey && e.key.toLowerCase() === "v") return false;
+  return true;
+}
+
+function createTerminal(cmd: Command): { term: Terminal; fit: FitAddon; el: HTMLDivElement } {
+  const el = document.createElement("div");
+  el.className = "term active";
+  stage.appendChild(el);
+  const term = new Terminal({
+    fontFamily: '"Cascadia Mono", Consolas, monospace',
+    fontSize,
+    cursorBlink: true,
+    allowProposedApi: true,
+    scrollback: 5000,
+    windowsPty: { backend: "conpty", buildNumber: 26200 },
+    theme: { background: "#0c0c0c" },
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  term.open(el);
+  try {
+    term.loadAddon(new WebglAddon());
+  } catch {
+    // WebGL недоступен - остается DOM-отрисовка
+  }
+  fit.fit();
+  term.attachCustomKeyEventHandler((e) => hostKeys(cmd, term, e));
+  return { term, fit, el };
+}
+
+function idOf(term: Terminal): number | null {
+  for (const inst of instances.values()) if (inst.term === term) return inst.id;
+  return null;
+}
+
+function send(id: number | null, data: string) {
+  if (id === null) return;
+  const inst = instances.get(id);
+  if (!inst || inst.exited) return;
+  invoke("write", { id, data }).catch((e) => console.error(e));
+}
+
+async function spawn(cmd: Command, cwd: string | null) {
+  // Команда с повышением прав открывается в отдельном окне после диалога UAC
+  if (cmd.elevate) {
+    invoke("launch_elevated", { program: cmd.program, args: cmd.args, cwd })
+      .then(() => showToast(`${cmd.title}: отдельное окно`))
+      .catch((e) => showToast(String(e)));
+    return;
+  }
+  const project = cwd ? projects.get(key(cwd)) : undefined;
+  // Продолжение последней сессии проекта, если у команды есть история и она уже есть на диске
+  const cont = !!cmd.history && !!project?.history.has(cmd.history);
+  const args = [...cmd.args, ...(cont ? cmd.continueArgs ?? [] : [])];
+  const { term, fit, el } = createTerminal(cmd);
+  for (const other of instances.values()) other.el.classList.remove("active");
+  try {
+    const res = await invoke<{ id: number }>("spawn", {
+      program: cmd.program,
+      args,
+      cwd,
+      cols: term.cols,
+      rows: term.rows,
+    });
+    const inst: Instance = { id: res.id, cmd, cwd, oscTitle: "", term, fit, el, exited: false };
+    instances.set(inst.id, inst);
+    order.push(inst.id);
+    term.onData((d) => send(inst.id, d));
+    term.onTitleChange((t) => {
+      inst.oscTitle = t;
+      if (inst.id === activeId) updateTitle();
+    });
+    for (const chunk of pending.get(inst.id) ?? []) term.write(chunk);
+    pending.delete(inst.id);
+    if (cmd.history) {
+      touch(cwd);
+      if (cwd) projects.get(key(cwd))!.history.set(cmd.history, Date.now());
+    }
+    activate(inst.id);
+  } catch (e) {
+    term.write(`\r\n[ошибка запуска ${cmd.program}: ${e}]\r\n`);
+  }
+}
+
+function updateTitle() {
+  const inst = activeId !== null ? instances.get(activeId) : undefined;
+  const title = inst
+    ? [inst.cmd.title, inst.cwd ? basename(inst.cwd) : "~", inst.oscTitle].filter(Boolean).join(" - ")
+    : APP_TITLE;
+  appWindow.setTitle(title).catch(() => {});
+}
+
+function activate(id: number) {
+  const inst = instances.get(id);
+  if (!inst) return;
+  for (const other of instances.values()) other.el.classList.toggle("active", other.id === id);
+  activeId = id;
+  if (inst.cwd) selectedKey = key(inst.cwd);
+  fitAll();
+  inst.term.focus();
+  updateTitle();
+  renderProjects();
+}
+
+function cycle(step: number) {
+  if (order.length === 0 || activeId === null) return;
+  const i = order.indexOf(activeId);
+  activate(order[(i + step + order.length) % order.length]);
+}
+
+function fitAll() {
+  for (const inst of instances.values()) {
+    const { cols, rows } = inst.term;
+    inst.fit.fit();
+    if (!inst.exited && (inst.term.cols !== cols || inst.term.rows !== rows || inst.id === activeId)) {
+      invoke("resize", { id: inst.id, cols: inst.term.cols, rows: inst.term.rows }).catch(() => {});
+    }
+  }
+}
+
+function closeInstance(id: number) {
+  const inst = instances.get(id);
+  if (!inst) return;
+  invoke("kill", { id }).catch(() => {});
+  inst.term.dispose();
+  inst.el.remove();
+  instances.delete(id);
+  order = order.filter((x) => x !== id);
+  if (activeId === id) {
+    activeId = null;
+    if (order.length) activate(order[order.length - 1]);
+    else updateTitle();
+  }
+  renderProjects();
+}
+
+// Живые экземпляры команд с историей (claude, pi) в проекте
+function liveInProject(k: string): Instance[] {
+  return order
+    .map((id) => instances.get(id)!)
+    .filter((i) => !i.exited && !!i.cmd.history && i.cwd !== null && key(i.cwd) === k);
+}
+
+// Команда для открытия проекта: та, чья история в проекте свежее, иначе первая с историей
+function defaultCommand(p: Project | undefined): Command | undefined {
+  const withHistory = config.commands.filter((c) => c.history);
+  if (p) {
+    const recent = [...p.history].sort((a, b) => b[1] - a[1])[0]?.[0];
+    const cmd = withHistory.find((c) => c.history === recent);
+    if (cmd) return cmd;
+  }
+  return withHistory[0] ?? config.commands[0];
+}
+
+function selectProject(k: string) {
+  selectedKey = k;
+  const live = liveInProject(k);
+  if (live.length) activate(live[live.length - 1].id);
+  else renderProjects();
+}
+
+function openProject(k: string) {
+  const live = liveInProject(k);
+  if (live.length) {
+    activate(live[live.length - 1].id);
+    return;
+  }
+  const p = projects.get(k);
+  const cmd = defaultCommand(p);
+  if (p && cmd) spawn(cmd, p.cwd);
+}
+
+// Каталог для новой команды: выбранный проект, иначе домашний
+function targetCwd(): string | null {
+  return selectedKey ? projects.get(selectedKey)?.cwd ?? null : null;
+}
+
+// Выбор или создание каталога в системном диалоге и новый сеанс в нем
+async function newInDirectory() {
+  const dir = await open({ directory: true, title: "Каталог для нового сеанса", defaultPath: targetCwd() ?? undefined });
+  if (typeof dir !== "string") return;
+  const k = key(dir);
+  if (!projects.has(k)) projects.set(k, { cwd: dir, modified: Date.now(), history: new Map() });
+  selectedKey = k;
+  const cmd = defaultCommand(projects.get(k));
+  if (cmd) spawn(cmd, dir);
+}
+
+function setSort(sort: "date" | "name") {
+  config.sort = sort;
+  saveConfig();
+  document.querySelectorAll<HTMLButtonElement>("#bar .sort button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.sort === sort);
+  });
+  renderProjects();
+}
+
+function renderProjects() {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const p of projects.values()) {
+    const n = basename(p.cwd).toLowerCase();
+    if (seen.has(n)) duplicates.add(n);
+    seen.add(n);
+  }
+  const label = (p: Project) => projectLabel(p.cwd, duplicates);
+  const sorted = [...projects.entries()].sort((a, b) =>
+    config.sort === "name"
+      ? label(a[1]).localeCompare(label(b[1]), "ru", { sensitivity: "base" })
+      : b[1].modified - a[1].modified,
+  );
+  const items: HTMLLIElement[] = [];
+  for (const [k, p] of sorted) {
+    const li = document.createElement("li");
+    li.className = k === selectedKey ? "selected" : "";
+    li.title = `${p.cwd}\nдвойной клик - открыть`;
+    // Тип проекта: иконки команд, чья история есть в проекте, свежая первой
+    const types = document.createElement("span");
+    types.className = "ptype";
+    for (const [kind] of [...p.history].sort((a, b) => b[1] - a[1])) {
+      const cmd = config.commands.find((c) => c.history === kind);
+      if (cmd) types.appendChild(iconNode(cmd));
+    }
+    li.appendChild(types);
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = label(p);
+    li.appendChild(name);
+    const live = liveInProject(k).length;
+    if (live) {
+      const dot = document.createElement("span");
+      dot.className = "live";
+      dot.textContent = live > 1 ? `● ${live}` : "●";
+      li.appendChild(dot);
+    }
+    const date = document.createElement("span");
+    date.className = "date";
+    date.textContent = formatDate(p.modified);
+    li.appendChild(date);
+    li.onclick = () => selectProject(k);
+    li.ondblclick = () => openProject(k);
+    items.push(li);
+  }
+  projectList.replaceChildren(...items);
+}
+
+// Иконка команды: картинка из файла (data URL из кеша) либо символ своим цветом
+function iconNode(cmd: Command): HTMLElement {
+  const url = iconCache.get(cmd.id);
+  if (url) {
+    const img = document.createElement("img");
+    img.src = url;
+    return img;
+  }
+  const span = document.createElement("span");
+  span.textContent = cmd.icon || cmd.id.slice(0, 2);
+  if (cmd.color) span.style.color = cmd.color;
+  return span;
+}
+
+async function renderCommands() {
+  for (const cmd of config.commands) {
+    if (/\.(png|svg|ico|jpe?g)$/i.test(cmd.icon) && !iconCache.has(cmd.id)) {
+      const url = await invoke<string>("read_icon", { path: cmd.icon }).catch(() => "");
+      if (url) iconCache.set(cmd.id, url);
+    }
+  }
+  commandBar.replaceChildren(
+    ...config.commands.map((cmd) => {
+      const b = document.createElement("button");
+      b.title = cmd.title;
+      b.appendChild(iconNode(cmd));
+      b.onclick = () => spawn(cmd, targetCwd());
+      return b;
+    }),
+  );
+}
+
+// Проекты из хранилищ сессий; удаленные с диска каталоги не показываются
+async function loadProjects() {
+  const list = await invoke<ProjectInfo[]>("list_projects");
+  for (const info of list) {
+    if (!info.exists) continue;
+    const history = new Map(Object.entries(info.history).map(([kind, t]) => [kind, t * 1000]));
+    projects.set(key(info.cwd), { cwd: info.cwd, modified: info.modified * 1000, history });
+  }
+  renderProjects();
+}
+
+listen<{ id: number; data: string }>("pty-output", (e) => {
+  const inst = instances.get(e.payload.id);
+  if (!inst) {
+    pending.set(e.payload.id, [...(pending.get(e.payload.id) ?? []), e.payload.data]);
+    return;
+  }
+  inst.term.write(e.payload.data);
+  if (inst.cmd.history) touch(inst.cwd);
+});
+
+// Завершение с кодом 0 закрывает экземпляр, иначе он остается с сообщением об ошибке
+listen<{ id: number; code: number | null }>("pty-exit", (e) => {
+  const inst = instances.get(e.payload.id);
+  if (!inst) return;
+  if (e.payload.code === 0) {
+    closeInstance(inst.id);
+    return;
+  }
+  inst.exited = true;
+  inst.term.write(`\r\n\x1b[90m[процесс завершен, код ${e.payload.code ?? "?"}]\x1b[0m\r\n`);
+  renderProjects();
+});
+
+document.getElementById("new-dir")!.onclick = newInDirectory;
+document.querySelectorAll<HTMLButtonElement>("#bar .sort button").forEach((b) => {
+  b.onclick = () => setSort(b.dataset.sort as "date" | "name");
+});
+
+// Alt + колесо мыши меняет размер шрифта, событие не доходит до терминала
+stage.addEventListener(
+  "wheel",
+  (e) => {
+    if (!e.altKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setFont(fontSize + (e.deltaY < 0 ? 1 : -1));
+  },
+  { capture: true, passive: false },
+);
+
+// Картинка в буфере без текста: приложению уходит его сочетание вставки картинки, файл оно читает само
+stage.addEventListener(
+  "paste",
+  (e) => {
+    const inst = activeId !== null ? instances.get(activeId) : undefined;
+    const data = e.clipboardData;
+    if (!inst?.cmd.pasteImage || !data || data.getData("text/plain")) return;
+    if (![...data.items].some((i) => i.kind === "file" && i.type.startsWith("image/"))) return;
+    e.preventDefault();
+    e.stopPropagation();
+    send(inst.id, inst.cmd.pasteImage);
+  },
+  { capture: true },
+);
+
+// Контекстное меню WebView в окне терминала не нужно
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+let resizeTimer = 0;
+new ResizeObserver(() => {
+  clearTimeout(resizeTimer);
+  resizeTimer = window.setTimeout(fitAll, 60);
+}).observe(stage);
+
+invoke<Config>("get_config")
+  .then((c) => (config = c))
+  .catch(() => {})
+  .finally(() => {
+    setFont(config.fontSize || FONT_DEFAULT, false);
+    document.querySelectorAll<HTMLButtonElement>("#bar .sort button").forEach((b) => {
+      b.classList.toggle("on", b.dataset.sort === (config.sort ?? "date"));
+    });
+    updateTitle();
+    renderCommands().finally(loadProjects);
+  });

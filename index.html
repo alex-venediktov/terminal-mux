@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>terminal-mux</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <aside id="side">
+      <div id="commands"></div>
+      <div id="bar">
+        <button id="new-dir" title="Выбрать или создать каталог и начать в нем новый сеанс">&#x1F4C2; каталог...</button>
+        <span class="sort">
+          <button data-sort="date" title="по последней активности">дата</button>
+          <button data-sort="name" title="по имени">имя</button>
+        </span>
+      </div>
+      <ul id="projects"></ul>
+    </aside>
+    <main id="stage"></main>
+    <div id="toast"></div>
+  </body>
+</html>
