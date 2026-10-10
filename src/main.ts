@@ -216,7 +216,7 @@ function hostKeys(cmd: Command, term: Terminal, e: KeyboardEvent): boolean {
     }
   }
   if (e.ctrlKey && (e.key === "PageUp" || e.key === "PageDown")) {
-    cycle(e.key === "PageDown" ? 1 : -1);
+    cycle(e.key === "PageUp" ? 1 : -1);
     e.preventDefault();
     return false;
   }
