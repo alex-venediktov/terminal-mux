@@ -64,7 +64,24 @@ pub fn build_command(program: &str, args: &[String]) -> Result<(PathBuf, Vec<Str
         let node = find_in_path("node").ok_or("node не найден в PATH")?;
         return Ok((node, full));
     }
+    if is_batch(&found) {
+        return Ok(batch_command(&found, full));
+    }
     Ok((found, full))
+}
+
+fn is_batch(path: &Path) -> bool {
+    path.extension()
+        .map(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+        .unwrap_or(false)
+}
+
+// Пакетный файл через cmd /c call: строка после /c не начинается с кавычки, и cmd не срезает кавычки пути с пробелами
+fn batch_command(script: &Path, args: Vec<String>) -> (PathBuf, Vec<String>) {
+    let comspec = std::env::var("ComSpec").unwrap_or("cmd.exe".into());
+    let mut full = vec!["/d".into(), "/c".into(), "call".into(), script.to_string_lossy().into_owned()];
+    full.extend(args);
+    (PathBuf::from(comspec), full)
 }
 
 // Подстановка переменных окружения вида %SystemRoot%; неизвестная переменная остается как есть
@@ -285,6 +302,24 @@ mod tests {
             assert!(args[0].ends_with(".js"));
             assert_eq!(&args[1..], ["--continue"]);
         }
+    }
+
+    /// Пакетный файл из каталога с пробелом получает аргумент с пробелом целиком.
+    #[test]
+    fn batch_file_in_path_with_spaces_receives_spaced_argument() {
+        let dir = std::env::temp_dir().join("mux batch test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("probe.cmd");
+        std::fs::write(&script, "@echo off\r\necho arg=[%~1]\r\n").unwrap();
+        let reg = Registry::default();
+        let sink = Arc::new(Collect::default());
+        let arg = r"D:\some dir\Hanna Pulse".to_string();
+        reg.spawn(sink.clone(), script.to_str().unwrap(), &[arg], None, 100, 30).unwrap();
+        if wait_for(&sink, "\x1b[6n") {
+            let id = reg.items.lock().unwrap().keys().next().copied().unwrap();
+            let _ = reg.write(id, b"\x1b[1;1R");
+        }
+        assert!(wait_for(&sink, r"arg=[D:\some dir\Hanna Pulse]"), "вывод: {}", sink.out.lock().unwrap());
     }
 
     /// Переменные окружения в пути программы раскрываются, неизвестные остаются нетронутыми.

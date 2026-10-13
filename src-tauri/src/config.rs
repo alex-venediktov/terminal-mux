@@ -5,10 +5,10 @@ use serde_json::{json, Map, Value};
 // Настройки по умолчанию: шрифт, порядок проектов (date или name), панель проектов и набор команд запуска
 pub fn defaults() -> Value {
     json!({
-        "fontSize": 14,
-        "sort": "date",
-        "sideWidth": 260,
-        "sideFontSize": 13,
+        "fontSize": 18,
+        "sort": "name",
+        "sideWidth": 350,
+        "sideFontSize": 17,
         "collapsed": [],
         "commands": [
             {
@@ -53,21 +53,37 @@ pub fn defaults() -> Value {
                 "elevate": true
             },
             {
-                "id": "ssh",
-                "title": "SSH",
-                "icon": "ssh",
-                "color": "#c586c0",
-                "program": "%SystemRoot%\\System32\\OpenSSH\\ssh.exe",
-                "args": ["{host}"],
-                "pick": "ssh-hosts"
-            },
-            {
                 "id": "cmd",
                 "title": "Командная строка",
                 "icon": "C:\\",
                 "color": "#bbbbbb",
                 "program": "cmd.exe",
                 "args": []
+            },
+            {
+                "id": "ssh",
+                "title": "SSH",
+                "icon": "\u{1f511}",
+                "color": "#c586c0",
+                "program": "%SystemRoot%\\System32\\OpenSSH\\ssh.exe",
+                "args": ["{host}"],
+                "pick": "ssh-hosts"
+            },
+            {
+                "id": "far",
+                "title": "Far Manager",
+                "icon": "\u{1f4bb}",
+                "color": "#A0A0FF",
+                "program": "C:\\Program Files\\Far Manager\\Far.exe",
+                "args": []
+            },
+            {
+                "id": "code",
+                "title": "VS Code",
+                "icon": "code",
+                "color": "#FFFFFF",
+                "program": "code",
+                "args": ["{cwd}"]
             }
         ]
     })

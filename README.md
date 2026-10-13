@@ -97,10 +97,10 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ```json
 {
-  "fontSize": 14,
-  "sort": "date",
-  "sideWidth": 260,
-  "sideFontSize": 13,
+  "fontSize": 18,
+  "sort": "name",
+  "sideWidth": 350,
+  "sideFontSize": 17,
   "collapsed": [],
   "commands": [
     {
@@ -123,7 +123,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 | `id`, `title` | идентификатор и подпись (в подсказке и заголовке окна) |
 | `icon` | символ или путь к `.png`, `.svg`, `.ico`, `.jpg` |
 | `color` | цвет символьной иконки |
-| `program`, `args` | что запускать; имя ищется в `PATH`, переменные вида `%SystemRoot%` раскрываются, npm-обёртка `.cmd` запускается через `node` напрямую; `{cwd}` в аргументах заменяется каталогом проекта (без проекта - домашним) |
+| `program`, `args` | что запускать; имя ищется в `PATH`, переменные вида `%SystemRoot%` раскрываются, npm-обёртка `.cmd` запускается через `node` напрямую, прочие `.cmd` и `.bat` - через `cmd /c call`; `{cwd}` в аргументах заменяется каталогом проекта (без проекта - домашним) |
 | `continueArgs` | аргументы продолжения последней сессии; добавляются, если в проекте есть история этой команды |
 | `history` | хранилище сессий команды: `claude` или `pi`. Команды без него не учитываются в панели проектов |
 | `shiftEnter` | что отправить приложению по Shift+Enter |
